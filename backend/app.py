@@ -1,17 +1,22 @@
-from flask import Flask, request
-from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
-import requests
+import os
+import json
+import logging
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from pytz import timezone
-import asyncio
-import aiohttp
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
 from apscheduler.schedulers.background import BackgroundScheduler
+
+from ai_service import DeepseekAI
 
 
 app = Flask(__name__)
-CORS(app)  # 允许所有域名的请求
+# 修改CORS设置，明确允许所有来源
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # 数据库配置
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///finance_news.db'
@@ -33,6 +38,21 @@ class FinanceNews(db.Model):
 
     def __repr__(self):
         return f'<FinanceNews {self.title}>'
+
+# 定义分析报告模型
+class AnalysisReport(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    news_count = db.Column(db.Integer, nullable=False)
+    time_range = db.Column(db.String(100), nullable=False)
+    reasoning = db.Column(db.Text, nullable=True)
+    analysis = db.Column(db.Text, nullable=False)
+    news_impact = db.Column(db.Text, nullable=True)
+    policy_impact = db.Column(db.Text, nullable=True)
+    market_prediction = db.Column(db.Text, nullable=True)
+    
+    def __repr__(self):
+        return f'<AnalysisReport {self.id} - {self.created_at}>'
 
 # 创建数据库
 with app.app_context():
@@ -207,8 +227,82 @@ scheduler = BackgroundScheduler()
 def run_fetch_news_task():
     asyncio.run(fetch_news_task())
 
-scheduler.add_job(run_fetch_news_task, 'interval', minutes=3)  # 每 3 分钟执行一次
+# 自动生成报告的定时任务
+def auto_generate_report():
+    with app.app_context():
+        try:
+            app.logger.info("开始执行自动生成报告任务...")
+            
+            # 计算12小时前的时间
+            time_ago = datetime.utcnow() - timedelta(hours=12)
+            
+            # 获取12小时内的新闻，按发布时间倒序排列
+            news_items = FinanceNews.query.filter(FinanceNews.created_at >= time_ago).order_by(FinanceNews.pub_time.desc()).all()
+            
+            if not news_items:
+                app.logger.warning("没有找到12小时内的新闻，无法生成报告")
+                return
+            
+            # 限制新闻数量为300条
+            limited_news = news_items[:300]
+            app.logger.info(f"自动分析: 最近12小时内, 限制为300条, 实际选择{len(limited_news)}条")
+            
+            # 格式化新闻内容供分析
+            news_content = ""
+            for news in limited_news:
+                news_content += f"标题: {news.title}\n"
+                news_content += f"时间: {news.pub_time}\n"
+                news_content += f"类型: {news.article_type}\n"
+                if news.summary:
+                    # 限制摘要长度为100字
+                    summary = news.summary[:100] + "..." if len(news.summary) > 100 else news.summary
+                    news_content += f"摘要: {summary}\n"
+                news_content += "\n---\n\n"
+            
+            # 检查输入长度
+            if len(news_content) > 30000:
+                app.logger.warning(f"新闻内容太长: {len(news_content)} 字符，将被截断")
+                news_content = news_content[:30000] + "...\n[内容已截断]"
+            
+            # 初始化AI服务并分析新闻
+            ai_service = DeepseekAI()
+            analysis_result = ai_service.analyze_news(news_content)
+            
+            time_range = f"{time_ago.strftime('%Y-%m-%d %H:%M:%S')} 至 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+            current_time = datetime.utcnow()
+            period = "早间" if 5 <= current_time.hour <= 11 else "晚间"
+            
+            # 创建新的分析报告
+            new_report = AnalysisReport(
+                news_count=len(limited_news),
+                time_range=f"{period}分析: {time_range}",
+                reasoning=analysis_result["reasoning"],
+                analysis=analysis_result["analysis"]
+            )
+            
+            # 如果有解析数据则添加
+            if "parsed_data" in analysis_result and analysis_result["parsed_data"]:
+                parsed = analysis_result["parsed_data"]
+                new_report.news_impact = parsed.get("news_impact", "")
+                new_report.policy_impact = parsed.get("policy_impact", "")
+                new_report.market_prediction = parsed.get("market_prediction", "")
+            
+            # 保存到数据库
+            db.session.add(new_report)
+            db.session.commit()
+            
+            app.logger.info(f"成功自动生成{period}分析报告 #{new_report.id}, 包含{len(limited_news)}条新闻")
+            
+        except Exception as e:
+            app.logger.error(f"自动生成报告时出错: {e}")
+
+scheduler.add_job(run_fetch_news_task, 'interval', minutes=5)  # 每 5 分钟执行一次
 scheduler.add_job(delete_old_news, 'interval', days=1)  # 每天执行一次
+
+# 添加定时生成报告的任务 - 每天早上8点和晚上8点
+scheduler.add_job(auto_generate_report, 'cron', hour=8, minute=0)  # 每天早上8点
+scheduler.add_job(auto_generate_report, 'cron', hour=20, minute=0)  # 每天晚上8点
+
 scheduler.start()
 
 @app.route('/')
@@ -219,12 +313,20 @@ def index():
 def get_news():
     sort_by = request.args.get('sort_by', 'pub_time')  # 默认按发布时间排序
     order = request.args.get('order', 'desc')  # 默认降序
+    keyword = request.args.get('keyword', '')  # 获取关键词参数
 
     # 根据排序参数构建查询
+    query = FinanceNews.query
+    
+    # 如果有关键词，添加标题搜索条件
+    if keyword:
+        query = query.filter(FinanceNews.title.like(f'%{keyword}%'))
+    
+    # 按排序条件排序
     if order == 'asc':
-        news_items = FinanceNews.query.order_by(getattr(FinanceNews, sort_by).asc()).all()
+        news_items = query.order_by(getattr(FinanceNews, sort_by).asc()).all()
     else:
-        news_items = FinanceNews.query.order_by(getattr(FinanceNews, sort_by).desc()).all()
+        news_items = query.order_by(getattr(FinanceNews, sort_by).desc()).all()
 
     news_list = [
         {
@@ -283,6 +385,151 @@ def delete_news_batch():
     except Exception as e:
         app.logger.error(f"批量删除文章时出错: {e}")
         return {"error": "批量删除文章时出错"}, 500
+
+@app.route('/analyze_24h_news', methods=['GET'])
+def analyze_24h_news():
+    try:
+        # 获取时间范围参数，默认为6小时
+        hours = request.args.get('hours', type=int, default=6)
+        # 获取最大新闻数量，默认为200条
+        max_news = request.args.get('max_news', type=int, default=200)
+        # 获取摘要长度限制，默认为100字
+        summary_limit = request.args.get('summary_limit', type=int, default=100)
+        
+        # 计算指定时间前
+        time_ago = datetime.utcnow() - timedelta(hours=hours)
+        
+        # 获取指定时间范围内的新闻，按发布时间倒序排列
+        news_items = FinanceNews.query.filter(FinanceNews.created_at >= time_ago).order_by(FinanceNews.pub_time.desc()).all()
+        
+        if not news_items:
+            return {"error": f"没有找到{hours}小时内的新闻"}, 404
+        
+        # 限制新闻数量，避免输入过长
+        limited_news = news_items[:max_news]
+        app.logger.info(f"分析新闻: 最近{hours}小时内, 限制为最近{max_news}条, 实际选择{len(limited_news)}条")
+        
+        # 格式化新闻内容供分析
+        news_content = ""
+        for news in limited_news:
+            news_content += f"标题: {news.title}\n"
+            news_content += f"时间: {news.pub_time}\n"
+            news_content += f"类型: {news.article_type}\n"
+            if news.summary:
+                # 限制摘要长度
+                summary = news.summary[:summary_limit] + "..." if len(news.summary) > summary_limit else news.summary
+                news_content += f"摘要: {summary}\n"
+            news_content += "\n---\n\n"
+        
+        # 检查输入长度
+        if len(news_content) > 30000:  # 根据模型限制调整此值
+            app.logger.warning(f"新闻内容太长: {len(news_content)} 字符，将被截断")
+            news_content = news_content[:30000] + "...\n[内容已截断]"
+        
+        # 初始化AI服务并分析新闻
+        ai_service = DeepseekAI()
+        try:
+            analysis_result = ai_service.analyze_news(news_content)
+        except Exception as e:
+            app.logger.error(f"AI分析失败: {str(e)}")
+            return {"error": f"AI分析失败: {str(e)}"}, 500
+        
+        time_range = f"{time_ago.strftime('%Y-%m-%d %H:%M:%S')} 至 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        # 创建新的分析报告
+        new_report = AnalysisReport(
+            news_count=len(limited_news),
+            time_range=time_range,
+            reasoning=analysis_result["reasoning"],
+            analysis=analysis_result["analysis"]
+        )
+        
+        # 如果有解析数据则添加
+        if "parsed_data" in analysis_result and analysis_result["parsed_data"]:
+            parsed = analysis_result["parsed_data"]
+            new_report.news_impact = parsed.get("news_impact", "")
+            new_report.policy_impact = parsed.get("policy_impact", "")
+            new_report.market_prediction = parsed.get("market_prediction", "")
+        
+        # 保存到数据库
+        db.session.add(new_report)
+        db.session.commit()
+        
+        response_data = {
+            "report_id": new_report.id,
+            "news_count": len(limited_news),
+            "time_range": time_range,
+            "reasoning": analysis_result["reasoning"],
+            "analysis": analysis_result["analysis"]
+        }
+        
+        # 如果有解析数据则包含
+        if "parsed_data" in analysis_result and analysis_result["parsed_data"]:
+            response_data["parsed_data"] = analysis_result["parsed_data"]
+        
+        return response_data, 200
+    
+    except Exception as e:
+        app.logger.error(f"分析新闻时出错: {e}")
+        return {"error": f"分析新闻时出错: {str(e)}"}, 500
+
+@app.route('/reports', methods=['GET'])
+def get_reports():
+    try:
+        # Get the latest reports ordered by creation time
+        reports = AnalysisReport.query.order_by(AnalysisReport.created_at.desc()).all()
+        
+        reports_list = [{
+            "id": report.id,
+            "created_at": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "news_count": report.news_count,
+            "time_range": report.time_range,
+            "news_impact": report.news_impact,
+            "policy_impact": report.policy_impact,
+            "market_prediction": report.market_prediction
+        } for report in reports]
+        
+        return {"reports": reports_list}, 200
+    
+    except Exception as e:
+        app.logger.error(f"获取分析报告时出错: {e}")
+        return {"error": f"获取分析报告时出错: {str(e)}"}, 500
+
+@app.route('/reports/<int:report_id>', methods=['GET'])
+def get_report(report_id):
+    try:
+        report = AnalysisReport.query.get(report_id)
+        
+        if not report:
+            return {"error": "报告未找到"}, 404
+        
+        report_data = {
+            "id": report.id,
+            "created_at": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "news_count": report.news_count,
+            "time_range": report.time_range,
+            "reasoning": report.reasoning,
+            "analysis": report.analysis,
+            "news_impact": report.news_impact,
+            "policy_impact": report.policy_impact,
+            "market_prediction": report.market_prediction
+        }
+        
+        return report_data, 200
+    
+    except Exception as e:
+        app.logger.error(f"获取分析报告详情时出错: {e}")
+        return {"error": f"获取分析报告详情时出错: {str(e)}"}, 500
+
+@app.route('/trigger_auto_report', methods=['GET'])
+def trigger_auto_report():
+    try:
+        app.logger.info("手动触发自动报告生成...")
+        auto_generate_report()
+        return {"message": "自动报告生成任务已触发，请稍后查看报告列表"}, 200
+    except Exception as e:
+        app.logger.error(f"手动触发自动报告时出错: {e}")
+        return {"error": f"手动触发自动报告时出错: {str(e)}"}, 500
 
 if __name__ == '__main__':
     app.run(debug=True)

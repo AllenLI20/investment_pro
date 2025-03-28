@@ -1,0 +1,6 @@
+/__pycache__/
+backend/venv
+*.log
+backend/instance/*
+frontend/my-app/node_modules/*
+frontend/__pycache__
