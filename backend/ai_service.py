@@ -10,6 +10,12 @@ summary_tmpl = """\
 1. 当日消息面整体情况，包括利好和利空消息，以及对相关行业和板块的影响
 2. 当日的政策面分析，有哪些重大的方向和板块需要关注，哪些行业/板块会受政策影响进行调整
 3. 对第二天行情的预测，看涨哪些板块，看跌哪些板块，哪些龙头股值得关注，哪些风险需要重点关注
+4. 对以下重点关注企业的走势预测：
+   - 明天走势预测
+   - 短期（1-2周）走势预测
+   - 长期（1-3个月）走势预测
+   
+重点关注企业：{focused_companies}
 
 新闻内容:
 {news_content}
@@ -19,7 +25,8 @@ summary_tmpl = """\
 {{
     "news_impact": "...",  // 消息面整体情况
     "policy_impact": "...",  // 政策面分析
-    "market_prediction": "..."  // 对第二天行情的预测
+    "market_prediction": "...",  // 对第二天行情的预测
+    "company_predictions": "..."  // 重点关注企业的走势预测，示例：[{{"company": "公司A", "report": "..."}}, {{"company": "公司B", "report": "..."}}]
 }}
 ```
 """
@@ -60,17 +67,30 @@ class DeepseekAI:
             "content": completion.choices[0].message.content
         }
     
-    def analyze_news(self, news_content):
+    def analyze_news(self, news_content, focused_companies=None):
         """
         Analyze financial news using the Deepseek model
         
         Args:
             news_content (str): News content to analyze
+            focused_companies (list): List of companies to focus on
             
         Returns:
             dict: Analysis results containing reasoning, content and parsed JSON
         """
-        result = self.generate(summary_tmpl.format(news_content=news_content))
+        # 确保 focused_companies 是列表类型
+        if focused_companies is None:
+            focused_companies = []
+        elif isinstance(focused_companies, str):
+            focused_companies = [company.strip() for company in focused_companies.split(',')]
+        
+        # 将列表转换为字符串，用顿号分隔
+        companies_str = '、'.join(focused_companies) if focused_companies else '无'
+        
+        result = self.generate(summary_tmpl.format(
+            news_content=news_content,
+            focused_companies=companies_str
+        ))
         
         # Parse JSON from the response
         parsed_json = self.parse_json_response(result["content"])

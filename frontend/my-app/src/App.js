@@ -15,7 +15,7 @@ function App() {
       <div className="App">
         <Navbar bg="dark" variant="dark" expand="lg">
           <Container>
-            <Navbar.Brand as={Link} to="/">InvestmentPro</Navbar.Brand>
+            <Navbar.Brand as={Link} to="/">InvestAid</Navbar.Brand>
             <Navbar.Toggle aria-controls="basic-navbar-nav" />
             <Navbar.Collapse id="basic-navbar-nav">
               <Nav className="me-auto">
@@ -41,7 +41,7 @@ function App() {
 function Home() {
   return (
     <Container className="mt-4">
-      <h1>欢迎使用 InvestmentPro</h1>
+      <h1>欢迎使用 InvestAid</h1>
       <p>财经资讯智能分析系统</p>
       <div className="d-grid gap-2 d-md-flex mt-4">
         <Link to="/news" className="btn btn-primary me-md-2">浏览新闻</Link>

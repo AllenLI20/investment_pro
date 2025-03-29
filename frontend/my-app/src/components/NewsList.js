@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Container, Card, Badge, Row, Col, Spinner, Alert, Form, Button, Pagination, InputGroup } from 'react-bootstrap';
+import Logo from './Logo';
 
 // API URL配置
 // 本地开发用127.0.0.1，服务器部署时使用环境变量或替换为服务器IP
@@ -13,7 +14,6 @@ function NewsList() {
   const [error, setError] = useState(null);
   const [sortBy, setSortBy] = useState('pub_time');
   const [order, setOrder] = useState('desc');
-  const [fetchTrigger, setFetchTrigger] = useState(false);
   
   // 分页相关状态
   const [currentPage, setCurrentPage] = useState(1);
@@ -29,7 +29,7 @@ function NewsList() {
 
   useEffect(() => {
     fetchNews();
-  }, [sortBy, order, fetchTrigger, currentPage, pageSize, searchTerm]);
+  }, [sortBy, order, currentPage, pageSize, searchTerm]);
 
   const fetchNews = async () => {
     try {
@@ -115,8 +115,8 @@ function NewsList() {
         timeout: 30000, // 抓取可能需要更长时间
       });
       alert(response.data.message || '抓取任务已启动！');
-      // Refresh the news list after a short delay
-      setTimeout(() => setFetchTrigger(!fetchTrigger), 3000);
+      // 直接调用 fetchNews 而不是使用 fetchTrigger
+      setTimeout(() => fetchNews(), 3000);
     } catch (err) {
       let errorMessage = '触发新闻抓取失败: ';
       
@@ -286,7 +286,23 @@ function NewsList() {
 
   return (
     <Container fluid className="px-4 px-md-5 mt-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
-      <h1 className="mb-4">财经新闻</h1>
+      {/* 标题 - 居中显示 */}
+      <Row className="justify-content-center mb-4">
+        <Col xs={12} md={8} lg={6} xl={4}>
+          <h1 className="text-center mb-4 d-flex align-items-center justify-content-center" style={{
+            fontFamily: "'Noto Sans SC', sans-serif",
+            fontWeight: 700,
+            fontSize: '2.8rem',
+            color: '#2c3e50',
+            letterSpacing: '1px',
+            textShadow: '1px 1px 2px rgba(0,0,0,0.1)',
+            marginBottom: '1.5rem'
+          }}>
+            <Logo size="2.5rem" className="me-3" style={{ color: '#2c3e50' }} />
+            最新财经新闻
+          </h1>
+        </Col>
+      </Row>
       
       {error && <Alert variant="danger">{error}</Alert>}
       
