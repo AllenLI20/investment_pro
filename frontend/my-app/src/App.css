@@ -1,0 +1,240 @@
+.App {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.App-logo {
+  height: 40vmin;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .App-logo {
+    animation: App-logo-spin infinite 20s linear;
+  }
+}
+
+.App-header {
+  background-color: #282c34;
+  padding: 20px;
+  color: white;
+  text-align: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.App-link {
+  color: #61dafb;
+}
+
+@keyframes App-logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.card {
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+}
+
+/* Truncate long text with ellipsis */
+.text-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Multi-line truncation for summaries */
+.card-text.text-truncate {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  height: 4.5em;
+}
+
+/* Custom styling for badges */
+.badge {
+  font-weight: 500;
+  padding: 0.35em 0.65em;
+}
+
+/* Fixed height for cards to maintain consistent layout */
+.card.h-100 {
+  display: flex;
+  flex-direction: column;
+}
+
+.card-body {
+  flex: 1 1 auto;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .d-flex.align-items-center {
+    flex-direction: column;
+    align-items: flex-start !important;
+  }
+  
+  .form-group, .mt-4 {
+    margin-bottom: 1rem;
+    width: 100%;
+  }
+}
+
+/* 新闻网格容器样式 - 完全替换 */
+.news-grid-container {
+  width: 100%;
+  margin-bottom: 2rem;
+}
+
+.news-grid-container .row {
+  display: flex;
+  flex-wrap: wrap;
+  margin-right: -0.75rem;
+  margin-left: -0.75rem;
+}
+
+.news-grid-container .col {
+  position: relative;
+  width: 100%;
+  padding-right: 0.75rem;
+  padding-left: 0.75rem;
+  margin-bottom: 1.5rem;
+  flex: 0 0 100%;
+  max-width: 100%;
+}
+
+/* 固定卡片布局 */
+@media (min-width: 1200px) {
+  .row-cols-xl-5 > .col {
+    flex: 0 0 20% !important;
+    max-width: 20% !important;
+  }
+}
+
+@media (min-width: 992px) and (max-width: 1199.98px) {
+  .row-cols-lg-4 > .col {
+    flex: 0 0 25% !important;
+    max-width: 25% !important;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 991.98px) {
+  .row-cols-md-3 > .col {
+    flex: 0 0 33.333333% !important;
+    max-width: 33.333333% !important;
+  }
+}
+
+@media (min-width: 576px) and (max-width: 767.98px) {
+  .row-cols-sm-2 > .col {
+    flex: 0 0 50% !important;
+    max-width: 50% !important;
+  }
+}
+
+/* 自定义新闻卡片网格 */
+.news-cards-row {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0 -0.75rem;
+}
+
+.news-card-col {
+  padding: 0 0.75rem;
+  margin-bottom: 1.5rem;
+  width: 100%;
+}
+
+.news-card {
+  height: 100%;
+  margin-bottom: 0;
+}
+
+/* 响应式卡片列宽 */
+@media (min-width: 1200px) {
+  .news-card-col {
+    flex: 0 0 20%;
+    max-width: 20%;
+  }
+}
+
+@media (min-width: 992px) and (max-width: 1199.98px) {
+  .news-card-col {
+    flex: 0 0 25%;
+    max-width: 25%;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 991.98px) {
+  .news-card-col {
+    flex: 0 0 33.333333%;
+    max-width: 33.333333%;
+  }
+}
+
+@media (min-width: 576px) and (max-width: 767.98px) {
+  .news-card-col {
+    flex: 0 0 50%;
+    max-width: 50%;
+  }
+}
+
+/* 分页器强制显示 */
+.pagination {
+  display: flex !important;
+  padding-left: 0;
+  list-style: none;
+  border-radius: 0.25rem;
+}
+
+.pagination > li {
+  display: list-item;
+}
+
+/* 标题文本截断样式 */
+.card-title .text-truncate {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+}
+
+/* 让卡片标题保持一致的高度 */
+.card-title {
+  height: 3em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.5;
+}
