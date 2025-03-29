@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy import text, JSON
 
 from ai_service import DeepseekAI
 
@@ -43,20 +44,101 @@ class FinanceNews(db.Model):
 class AnalysisReport(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    news_count = db.Column(db.Integer, nullable=False)
-    time_range = db.Column(db.String(100), nullable=False)
+    news_count = db.Column(db.Integer, nullable=True)
+    time_range = db.Column(db.String(200), nullable=True)
     reasoning = db.Column(db.Text, nullable=True)
-    analysis = db.Column(db.Text, nullable=False)
+    analysis = db.Column(db.Text, nullable=True)
     news_impact = db.Column(db.Text, nullable=True)
     policy_impact = db.Column(db.Text, nullable=True)
     market_prediction = db.Column(db.Text, nullable=True)
-    
+    focused_companies = db.Column(db.JSON, default=list, nullable=True)
+    company_predictions = db.Column(db.JSON, default=list, nullable=True)
+
+    def __init__(self, **kwargs):
+        super(AnalysisReport, self).__init__(**kwargs)
+        # 确保 JSON 字段是列表类型
+        if not isinstance(self.focused_companies, list):
+            self.focused_companies = []
+        if not isinstance(self.company_predictions, list):
+            self.company_predictions = []
+
     def __repr__(self):
         return f'<AnalysisReport {self.id} - {self.created_at}>'
 
 # 创建数据库
+def update_database_schema():
+    """更新数据库表结构，添加缺失的字段"""
+    try:
+        with db.engine.connect() as conn:
+            # 获取所有模型类
+            models = [FinanceNews, AnalysisReport]
+            
+            for model in models:
+                # 获取表名
+                table_name = model.__tablename__
+                
+                # 获取数据库中的列信息
+                result = conn.execute(text(f"PRAGMA table_info({table_name})"))
+                db_columns = {row[1] for row in result}
+                
+                # 获取模型定义的列信息
+                model_columns = {column.name for column in model.__table__.columns}
+                
+                # 找出缺失的列
+                missing_columns = model_columns - db_columns
+                
+                # 添加缺失的列
+                for column_name in missing_columns:
+                    column = model.__table__.columns[column_name]
+                    
+                    # 将 SQLAlchemy 类型转换为 SQLite 类型
+                    type_str = str(column.type)
+                    if 'VARCHAR' in type_str or 'String' in type_str:
+                        sqlite_type = 'TEXT'
+                    elif 'INTEGER' in type_str:
+                        sqlite_type = 'INTEGER'
+                    elif 'DATETIME' in type_str:
+                        sqlite_type = 'DATETIME'
+                    elif 'BOOLEAN' in type_str:
+                        sqlite_type = 'INTEGER'
+                    else:
+                        sqlite_type = 'TEXT'  # 默认类型
+                    
+                    # 构建 ALTER TABLE 语句
+                    sql = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sqlite_type}"
+                    
+                    # 添加 NOT NULL 约束（如果需要）
+                    if not column.nullable:
+                        sql += " NOT NULL"
+                    
+                    # 添加默认值（如果有）
+                    if column.default is not None:
+                        if isinstance(column.default.arg, str):
+                            sql += f" DEFAULT '{column.default.arg}'"
+                        else:
+                            sql += f" DEFAULT {column.default.arg}"
+                    
+                    app.logger.info(f"正在为表 {table_name} 添加字段 {column_name}...")
+                    app.logger.info(f"SQL: {sql}")
+                    conn.execute(text(sql))
+            
+            conn.commit()
+            app.logger.info("数据库表结构更新完成")
+            
+    except Exception as e:
+        app.logger.error(f"更新数据库表结构时出错: {e}")
+        raise e
+
+# 创建数据库
 with app.app_context():
-    db.create_all()
+    try:
+        # 尝试创建所有表（如果不存在）
+        db.create_all()
+        # 更新表结构，添加缺失的字段
+        update_database_schema()
+    except Exception as e:
+        app.logger.error(f"数据库初始化出错: {e}")
+        raise e
 
 # 定义删除旧内容的任务
 def delete_old_news():
@@ -69,156 +151,158 @@ def delete_old_news():
 
 # 定义抓取新闻的任务
 async def fetch_news_task():
-    with app.app_context():
-        # 抓取主新闻
-        url = 'https://www.cls.cn/'
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            # 抓取主新闻页面
-            response = await session.get(url, headers=headers)
-            if response.status != 200:
-                app.logger.error("无法访问网站，状态码: %s", response.status)
-                return "无法访问网站", 500
+    try:
+        with app.app_context():
+            # 抓取主新闻
+            url = 'https://www.cls.cn/'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                # 抓取主新闻页面
+                response = await session.get(url, headers=headers)
+                if response.status != 200:
+                    app.logger.error("无法访问网站，状态码: %s", response.status)
+                    return {"error": "无法访问网站"}, 500
 
-            html = await response.text()
-            soup = BeautifulSoup(html, 'html.parser')
+                html = await response.text()
+                soup = BeautifulSoup(html, 'html.parser')
 
-            # 查找主新闻
-            articles = []
-            # 抓取头条文章预览块
-            headline_items = soup.select('.home-article-list a')
-            articles.extend(headline_items)
-            # 抓取推荐文章列表
-            recommended_items = soup.select('.home-article-rec a')
-            articles.extend(recommended_items)
-            # 抓取文章排名块
-            ranking_items = soup.select('.home-article-ranking-list a')
-            articles.extend(ranking_items)
+                # 查找主新闻
+                articles = []
+                # 抓取头条文章预览块
+                headline_items = soup.select('.home-article-list a')
+                articles.extend(headline_items)
+                # 抓取推荐文章列表
+                recommended_items = soup.select('.home-article-rec a')
+                articles.extend(recommended_items)
+                # 抓取文章排名块
+                ranking_items = soup.select('.home-article-ranking-list a')
+                articles.extend(ranking_items)
 
-            # 抓取电报页面
-            telegraph_url = 'https://www.cls.cn/telegraph'
-            telegraph_response = await session.get(telegraph_url, headers=headers)
-            if telegraph_response.status != 200:
-                app.logger.error("无法访问电报页面，状态码: %s", telegraph_response.status)
-                return "无法访问电报页面", 500
+                # 抓取电报页面
+                telegraph_url = 'https://www.cls.cn/telegraph'
+                telegraph_response = await session.get(telegraph_url, headers=headers)
+                if telegraph_response.status != 200:
+                    app.logger.error("无法访问电报页面，状态码: %s", telegraph_response.status)
+                    return {"error": "无法访问电报页面"}, 500
 
-            telegraph_html = await telegraph_response.text()
-            telegraph_soup = BeautifulSoup(telegraph_html, 'html.parser')  # 解析电报页面的 HTML
+                telegraph_html = await telegraph_response.text()
+                telegraph_soup = BeautifulSoup(telegraph_html, 'html.parser')  # 解析电报页面的 HTML
 
-            # 查找电报内容
-            telegraph_links = telegraph_soup.select('a[href*="detail"]')  # 选择所有 href 中包含 detail 的 a 标签
-            for item in telegraph_links:
-                print(type(item))
-                link = item['href']
-                title = item.get_text(strip=True)  # 获取文本并去除多余空格
-                articles.append(item)  # 将电报内容添加到文章列表中
+                # 查找电报内容
+                telegraph_links = telegraph_soup.select('a[href*="detail"]')  # 选择所有 href 中包含 detail 的 a 标签
+                for item in telegraph_links:
+                    link = item['href']
+                    title = item.get_text(strip=True)  # 获取文本并去除多余空格
+                    articles.append(item)  # 将电报内容添加到文章列表中
 
-            app.logger.info("抓取到的文章数量: %d", len(articles))
+                app.logger.info("抓取到的文章数量: %d", len(articles))
 
-            # 处理抓取到的文章
-            count = 0
-            total_articles = len(articles)
-            beijing_tz = timezone('Asia/Shanghai')
-            current_time = datetime.now(beijing_tz)
+                # 处理抓取到的文章
+                count = 0
+                total_articles = len(articles)
+                beijing_tz = timezone('Asia/Shanghai')
+                current_time = datetime.now(beijing_tz)
 
-            for article in articles:
-                if 'detail/' in article['href']:
-                    title = article.get_text()  # 从 BeautifulSoup 对象中获取标题
-                    link = article['href']
-                    article_id = link.split('/')[-1]
-                    url = f'https://www.cls.cn/detail/{article_id}'  # 生成 URL
-                    
-                    # 检查文章是否已存在
-                    existing_article = FinanceNews.query.filter_by(article_id=article_id).first()
-                    if existing_article:
-                        app.logger.info(f"Article ID {article_id} already exists, skipping.")
-                        continue
-                    
-                    # 抓取文章详情
-                    detail_response = await session.get(url, headers=headers)
-                    detail_soup = BeautifulSoup(await detail_response.text(), 'html.parser')
+                for article in articles:
+                    if 'detail/' in article['href']:
+                        title = article.get_text()  # 从 BeautifulSoup 对象中获取标题
+                        link = article['href']
+                        article_id = link.split('/')[-1]
+                        url = f'https://www.cls.cn/detail/{article_id}'  # 生成 URL
+                        
+                        # 检查文章是否已存在
+                        existing_article = FinanceNews.query.filter_by(article_id=article_id).first()
+                        if existing_article:
+                            app.logger.info(f"Article ID {article_id} already exists, skipping.")
+                            continue
+                        
+                        # 抓取文章详情
+                        detail_response = await session.get(url, headers=headers)
+                        detail_soup = BeautifulSoup(await detail_response.text(), 'html.parser')
 
-                    # 判断文章类型
-                    article_type = '长文'  # 默认类型
-                    if detail_soup.find('img', src=lambda x: x and 'image/telegraph-logo.png' in x):
-                        article_type = '电报'
-                    # 根据文章类型提取标题
-                    if article_type == '电报':
-                        title_element = detail_soup.select_one('.detail-header')  # 电报标题
-                    else:
-                        title_element = detail_soup.select_one('.detail-title-content')  # 长文标题
-                    title = title_element.get_text(strip=True) if title_element else "无标题"  # 获取标题
-                    if title == '无标题':
-                        continue
-                    
-                    # 提取发布时间和摘要
-                    pub_time = None
-                    summary_text = None  # 新增摘要变量
-                    content_text = ''  # 初始化 content_text 变量
-                    if article_type == '电报':
-                        pub_time_element = detail_soup.find('span', class_='f-s-24 f-w-b')
-                        if pub_time_element:
-                            pub_time = pub_time_element.get_text()
-                            summary = detail_soup.find(lambda tag: tag.name == "div" and "detail-telegraph-content" in tag.get("class", []))
-                            summary_text = summary.get_text(separator='\n') if summary else ''
-                    else:
-                        pub_time_element = detail_soup.find('div', class_='f-l m-r-10')
-                        if pub_time_element:
-                            pub_time = pub_time_element.get_text()
-                            summary = detail_soup.find(lambda tag: tag.name == "pre" and "detail-brief" in tag.get("class", []))
-                            summary_text = summary.get_text(separator='\n') if summary else ''  # 获取摘要
-                            content = detail_soup.find(lambda tag: tag.name == "div" and "detail-content" in tag.get("class", []))
-                            content_text = content.get_text(separator='\n') if content else ''
-
-                    # 格式化发布时间
-                    if pub_time:
+                        # 判断文章类型
+                        article_type = '长文'  # 默认类型
+                        if detail_soup.find('img', src=lambda x: x and 'image/telegraph-logo.png' in x):
+                            article_type = '电报'
+                        # 根据文章类型提取标题
                         if article_type == '电报':
-                            pub_time = datetime.strptime(pub_time, "%Y年%m月%d日 %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
-                        else:  # 长文
-                            week_mapping = {
-                                "星期一": "1",
-                                "星期二": "2",
-                                "星期三": "3",
-                                "星期四": "4",
-                                "星期五": "5",
-                                "星期六": "6",
-                                "星期日": "0"
-                            }
-                            for week_ch, week_num in week_mapping.items():
-                                pub_time = pub_time.replace(week_ch, week_num)
-                            pub_time = datetime.strptime(pub_time, "%Y-%m-%d %H:%M %w").strftime("%Y-%m-%d %H:%M:%S")
+                            title_element = detail_soup.select_one('.detail-header')  # 电报标题
+                        else:
+                            title_element = detail_soup.select_one('.detail-title-content')  # 长文标题
+                        title = title_element.get_text(strip=True) if title_element else "无标题"  # 获取标题
+                        if title == '无标题':
+                            continue
+                        
+                        # 提取发布时间和摘要
+                        pub_time = None
+                        summary_text = None  # 新增摘要变量
+                        content_text = ''  # 初始化 content_text 变量
+                        if article_type == '电报':
+                            pub_time_element = detail_soup.find('span', class_='f-s-24 f-w-b')
+                            if pub_time_element:
+                                pub_time = pub_time_element.get_text()
+                                summary = detail_soup.find(lambda tag: tag.name == "div" and "detail-telegraph-content" in tag.get("class", []))
+                                summary_text = summary.get_text(separator='\n') if summary else ''
+                        else:
+                            pub_time_element = detail_soup.find('div', class_='f-l m-r-10')
+                            if pub_time_element:
+                                pub_time = pub_time_element.get_text()
+                                summary = detail_soup.find(lambda tag: tag.name == "pre" and "detail-brief" in tag.get("class", []))
+                                summary_text = summary.get_text(separator='\n') if summary else ''  # 获取摘要
+                                content = detail_soup.find(lambda tag: tag.name == "div" and "detail-content" in tag.get("class", []))
+                                content_text = content.get_text(separator='\n') if content else ''
 
-                    # 插入数据库
-                    try:
-                        news_item = FinanceNews(
-                            title=title,
-                            link=link,
-                            article_id=article_id,
-                            created_at=current_time,
-                            pub_time=pub_time,
-                            article_type=article_type,
-                            summary=summary_text,  # 存储摘要
-                            content=content_text,
-                            url=url  # 存储 URL
-                        )
-                        db.session.add(news_item)
-                        count += 1
-                    except Exception as e:
-                        app.logger.error(f"Error inserting article {article_id}: {e}")
+                        # 格式化发布时间
+                        if pub_time:
+                            if article_type == '电报':
+                                pub_time = datetime.strptime(pub_time, "%Y年%m月%d日 %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+                            else:  # 长文
+                                week_mapping = {
+                                    "星期一": "1",
+                                    "星期二": "2",
+                                    "星期三": "3",
+                                    "星期四": "4",
+                                    "星期五": "5",
+                                    "星期六": "6",
+                                    "星期日": "0"
+                                }
+                                for week_ch, week_num in week_mapping.items():
+                                    pub_time = pub_time.replace(week_ch, week_num)
+                                pub_time = datetime.strptime(pub_time, "%Y-%m-%d %H:%M %w").strftime("%Y-%m-%d %H:%M:%S")
 
-                    # 更新进度
-                    fetch_progress = (count) / total_articles * 100
-                    app.logger.info(f"抓取进度: {fetch_progress:.2f}%")
+                        # 插入数据库
+                        try:
+                            news_item = FinanceNews(
+                                title=title,
+                                link=link,
+                                article_id=article_id,
+                                created_at=current_time,
+                                pub_time=pub_time,
+                                article_type=article_type,
+                                summary=summary_text,  # 存储摘要
+                                content=content_text,
+                                url=url  # 存储 URL
+                            )
+                            db.session.add(news_item)
+                            count += 1
+                        except Exception as e:
+                            app.logger.error(f"Error inserting article {article_id}: {e}")
 
-            db.session.commit()
-            fetch_progress = 100  # 完成抓取时设置为 100%
-            return f"财经资讯已抓取并存储到数据库！共抓取到 {count} 条文章。"
+                        # 更新进度
+                        fetch_progress = (count) / total_articles * 100
+                        app.logger.info(f"抓取进度: {fetch_progress:.2f}%")
+
+                db.session.commit()
+                return {"message": f"财经资讯已抓取并存储到数据库！共抓取到 {count} 条文章。"}, 200
+    except Exception as e:
+        app.logger.error(f"抓取新闻时出错: {e}")
+        return {"error": f"抓取新闻时出错: {str(e)}"}, 500
 
 # 设置调度器
 scheduler = BackgroundScheduler()
@@ -229,72 +313,36 @@ def run_fetch_news_task():
 
 # 自动生成报告的定时任务
 def auto_generate_report():
-    with app.app_context():
-        try:
-            app.logger.info("开始执行自动生成报告任务...")
+    """自动生成市场分析报告"""
+    try:
+        # 获取最近12小时的新闻
+        news = FinanceNews.query.filter(
+            FinanceNews.created_at >= datetime.utcnow() - timedelta(hours=12)
+        ).order_by(FinanceNews.created_at.desc()).limit(300).all()
+        
+        if not news:
+            return jsonify({'error': '没有找到最近12小时的新闻'}), 404
             
-            # 计算12小时前的时间
-            time_ago = datetime.utcnow() - timedelta(hours=12)
+        # 生成分析报告
+        report = generate_market_analysis(
+            news=news,
+            hours=12,
+            max_news=300,
+            summary_limit=100,
+            focused_companies='腾讯、小米集团、中芯国际、特斯拉、药明康德、阿里巴巴'  # 添加默认关注企业列表
+        )
+        
+        if report:
+            return jsonify({
+                'message': '自动报告生成成功',
+                'report_id': report.id
+            })
+        else:
+            return jsonify({'error': '报告生成失败'}), 500
             
-            # 获取12小时内的新闻，按发布时间倒序排列
-            news_items = FinanceNews.query.filter(FinanceNews.created_at >= time_ago).order_by(FinanceNews.pub_time.desc()).all()
-            
-            if not news_items:
-                app.logger.warning("没有找到12小时内的新闻，无法生成报告")
-                return
-            
-            # 限制新闻数量为300条
-            limited_news = news_items[:300]
-            app.logger.info(f"自动分析: 最近12小时内, 限制为300条, 实际选择{len(limited_news)}条")
-            
-            # 格式化新闻内容供分析
-            news_content = ""
-            for news in limited_news:
-                news_content += f"标题: {news.title}\n"
-                news_content += f"时间: {news.pub_time}\n"
-                news_content += f"类型: {news.article_type}\n"
-                if news.summary:
-                    # 限制摘要长度为100字
-                    summary = news.summary[:100] + "..." if len(news.summary) > 100 else news.summary
-                    news_content += f"摘要: {summary}\n"
-                news_content += "\n---\n\n"
-            
-            # 检查输入长度
-            if len(news_content) > 30000:
-                app.logger.warning(f"新闻内容太长: {len(news_content)} 字符，将被截断")
-                news_content = news_content[:30000] + "...\n[内容已截断]"
-            
-            # 初始化AI服务并分析新闻
-            ai_service = DeepseekAI()
-            analysis_result = ai_service.analyze_news(news_content)
-            
-            time_range = f"{time_ago.strftime('%Y-%m-%d %H:%M:%S')} 至 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
-            current_time = datetime.utcnow()
-            period = "早间" if 5 <= current_time.hour <= 11 else "晚间"
-            
-            # 创建新的分析报告
-            new_report = AnalysisReport(
-                news_count=len(limited_news),
-                time_range=f"{period}分析: {time_range}",
-                reasoning=analysis_result["reasoning"],
-                analysis=analysis_result["analysis"]
-            )
-            
-            # 如果有解析数据则添加
-            if "parsed_data" in analysis_result and analysis_result["parsed_data"]:
-                parsed = analysis_result["parsed_data"]
-                new_report.news_impact = parsed.get("news_impact", "")
-                new_report.policy_impact = parsed.get("policy_impact", "")
-                new_report.market_prediction = parsed.get("market_prediction", "")
-            
-            # 保存到数据库
-            db.session.add(new_report)
-            db.session.commit()
-            
-            app.logger.info(f"成功自动生成{period}分析报告 #{new_report.id}, 包含{len(limited_news)}条新闻")
-            
-        except Exception as e:
-            app.logger.error(f"自动生成报告时出错: {e}")
+    except Exception as e:
+        logger.error(f"自动生成报告失败: {str(e)}")
+        return jsonify({'error': f'自动生成报告失败: {str(e)}'}), 500
 
 scheduler.add_job(run_fetch_news_task, 'interval', minutes=5)  # 每 5 分钟执行一次
 scheduler.add_job(delete_old_news, 'interval', days=1)  # 每天执行一次
@@ -346,11 +394,13 @@ def get_news():
 @app.route('/fetch_news', methods=['GET'])
 def fetch_news():
     try:
-        asyncio.run(fetch_news_task())  # 手动调用抓取任务
-        return {"message": "新闻抓取任务已启动！"}, 200
+        result = asyncio.run(fetch_news_task())  # 手动调用抓取任务
+        if isinstance(result, tuple):
+            return result  # 如果返回了元组 (response, status_code)，直接返回
+        return {"message": result}, 200  # 否则包装在 message 字段中
     except Exception as e:
         app.logger.error(f"抓取新闻时出错: {e}")
-        return {"error": "抓取新闻时出错"}, 500
+        return {"error": f"抓取新闻时出错: {str(e)}"}, 500
 
 @app.route('/delete_news/<article_id>', methods=['DELETE'])
 def delete_news(article_id):
@@ -395,6 +445,17 @@ def analyze_24h_news():
         max_news = request.args.get('max_news', type=int, default=200)
         # 获取摘要长度限制，默认为100字
         summary_limit = request.args.get('summary_limit', type=int, default=100)
+        # 获取关注企业列表，默认为空列表
+        focused_companies = request.args.get('focused_companies', default='[]')
+        try:
+            # 尝试解析 JSON 字符串
+            focused_companies = json.loads(focused_companies)
+            # 确保是列表类型
+            if not isinstance(focused_companies, list):
+                focused_companies = []
+        except json.JSONDecodeError:
+            app.logger.warning(f"无法解析关注企业列表: {focused_companies}")
+            focused_companies = []
         
         # 计算指定时间前
         time_ago = datetime.utcnow() - timedelta(hours=hours)
@@ -429,27 +490,45 @@ def analyze_24h_news():
         # 初始化AI服务并分析新闻
         ai_service = DeepseekAI()
         try:
-            analysis_result = ai_service.analyze_news(news_content)
+            analysis_result = ai_service.analyze_news(news_content, focused_companies)
         except Exception as e:
             app.logger.error(f"AI分析失败: {str(e)}")
             return {"error": f"AI分析失败: {str(e)}"}, 500
         
-        time_range = f"{time_ago.strftime('%Y-%m-%d %H:%M:%S')} 至 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+        # 将 UTC 时间转换为北京时间（UTC+8）
+        time_ago_beijing = time_ago + timedelta(hours=8)
+        current_time_beijing = datetime.utcnow() + timedelta(hours=8)
+        time_range = f"{time_ago_beijing.strftime('%Y-%m-%d %H:%M:%S')} 至 {current_time_beijing.strftime('%Y-%m-%d %H:%M:%S')}"
         
         # 创建新的分析报告
         new_report = AnalysisReport(
             news_count=len(limited_news),
             time_range=time_range,
             reasoning=analysis_result["reasoning"],
-            analysis=analysis_result["analysis"]
+            analysis=analysis_result["analysis"],
+            focused_companies=focused_companies,  # 直接存储列表
+            news_impact=analysis_result["parsed_data"].get("news_impact"),
+            policy_impact=analysis_result["parsed_data"].get("policy_impact"),
+            market_prediction=analysis_result["parsed_data"].get("market_prediction")
         )
         
-        # 如果有解析数据则添加
-        if "parsed_data" in analysis_result and analysis_result["parsed_data"]:
-            parsed = analysis_result["parsed_data"]
-            new_report.news_impact = parsed.get("news_impact", "")
-            new_report.policy_impact = parsed.get("policy_impact", "")
-            new_report.market_prediction = parsed.get("market_prediction", "")
+        # 处理 company_predictions
+        company_predictions = analysis_result["parsed_data"].get("company_predictions", [])
+        if isinstance(company_predictions, list):
+            # 如果已经是列表格式，直接使用
+            new_report.company_predictions = company_predictions
+        elif isinstance(company_predictions, dict):
+            # 如果是字典格式，转换为列表格式
+            new_report.company_predictions = [
+                {
+                    "company": company,
+                    "report": prediction
+                }
+                for company, prediction in company_predictions.items()
+            ]
+        else:
+            app.logger.warning(f"未知的 company_predictions 格式: {type(company_predictions)}")
+            new_report.company_predictions = []
         
         # 保存到数据库
         db.session.add(new_report)
@@ -484,9 +563,12 @@ def get_reports():
             "created_at": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             "news_count": report.news_count,
             "time_range": report.time_range,
+            "reasoning": report.reasoning,
             "news_impact": report.news_impact,
             "policy_impact": report.policy_impact,
-            "market_prediction": report.market_prediction
+            "market_prediction": report.market_prediction,
+            "focused_companies": report.focused_companies or [],
+            "company_predictions": report.company_predictions or []
         } for report in reports]
         
         return {"reports": reports_list}, 200
@@ -503,6 +585,9 @@ def get_report(report_id):
         if not report:
             return {"error": "报告未找到"}, 404
         
+        # 确保 company_predictions 是列表类型
+        company_predictions = report.company_predictions if isinstance(report.company_predictions, list) else []
+        
         report_data = {
             "id": report.id,
             "created_at": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -512,10 +597,12 @@ def get_report(report_id):
             "analysis": report.analysis,
             "news_impact": report.news_impact,
             "policy_impact": report.policy_impact,
-            "market_prediction": report.market_prediction
+            "market_prediction": report.market_prediction,
+            "focused_companies": report.focused_companies if isinstance(report.focused_companies, list) else [],
+            "company_predictions": company_predictions
         }
         
-        return report_data, 200
+        return jsonify(report_data), 200
     
     except Exception as e:
         app.logger.error(f"获取分析报告详情时出错: {e}")
@@ -530,6 +617,23 @@ def trigger_auto_report():
     except Exception as e:
         app.logger.error(f"手动触发自动报告时出错: {e}")
         return {"error": f"手动触发自动报告时出错: {str(e)}"}, 500
+
+@app.route('/reports/<int:report_id>', methods=['DELETE'])
+def delete_report(report_id):
+    try:
+        report = AnalysisReport.query.get(report_id)
+        
+        if not report:
+            return {"error": "报告未找到"}, 404
+        
+        db.session.delete(report)
+        db.session.commit()
+        
+        return {"message": "报告已删除"}, 200
+    
+    except Exception as e:
+        app.logger.error(f"删除报告时出错: {e}")
+        return {"error": f"删除报告时出错: {str(e)}"}, 500
 
 if __name__ == '__main__':
     app.run(debug=True)

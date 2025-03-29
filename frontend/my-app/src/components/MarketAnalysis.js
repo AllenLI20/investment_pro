@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Button, Card, Container, Row, Col, Spinner, Alert, ListGroup, Badge, Accordion, Form } from 'react-bootstrap';
+import AnalysisLogo from './AnalysisLogo';
 
 // API URL配置
 // 本地开发用127.0.0.1，服务器部署时使用环境变量或替换为服务器IP
@@ -17,6 +18,7 @@ function MarketAnalysis() {
   const [timeRange, setTimeRange] = useState(6); // 默认6小时
   const [summaryLimit, setSummaryLimit] = useState(100); // 默认摘要100字
   const [autoReportLoading, setAutoReportLoading] = useState(false); // 自动报告加载状态
+  const [focusedCompanies, setFocusedCompanies] = useState('腾讯、小米集团、中芯国际、特斯拉、药明康德、阿里巴巴'); // 默认关注企业
 
   // Fetch reports on component mount
   useEffect(() => {
@@ -65,11 +67,19 @@ function MarketAnalysis() {
       setLoading(true);
       setAnalysisSuccess(false);
       setError(null);
+
+      // 处理企业列表，移除空格并分割
+      const companies = focusedCompanies
+        .split(/[,，、；;\s]+/)
+        .map(company => company.trim())
+        .filter(company => company.length > 0);
+
       const response = await axios.get(`${API_URL}/analyze_24h_news`, {
         params: {
           hours: timeRange,
           max_news: maxNews,
-          summary_limit: summaryLimit
+          summary_limit: summaryLimit,
+          focused_companies: JSON.stringify(companies) // 将数组序列化为 JSON 字符串
         },
         timeout: 60000, // 分析可能需要更长时间
         withCredentials: false,
@@ -149,10 +159,13 @@ function MarketAnalysis() {
   // Format date string
   const formatDate = (dateString) => {
     const date = new Date(dateString);
+    // 将 UTC 时间转换为北京时间（UTC+8）
+    const beijingDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
     return new Intl.DateTimeFormat('zh-CN', {
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).format(date);
+      timeZone: 'Asia/Shanghai'  // 使用北京时区
+    }).format(beijingDate);
   };
 
   // 添加自动生成报告的时间显示
@@ -164,18 +177,20 @@ function MarketAnalysis() {
     morningReport.setHours(8, 0, 0, 0);
     eveningReport.setHours(20, 0, 0, 0);
     
-    // 如果已经过了今天的时间点，则设为明天
-    if (now > morningReport) {
-      morningReport.setDate(morningReport.getDate() + 1);
-    }
-    if (now > eveningReport) {
-      eveningReport.setDate(eveningReport.getDate() + 1);
-    }
-    
     // 计算最近的下一次报告时间
-    const nextReport = now > morningReport && now < eveningReport ? 
-      eveningReport : 
-      (now > eveningReport ? morningReport : morningReport);
+    let nextReport;
+    if (now < morningReport) {
+      // 如果当前时间在早上8点之前，下一次报告是今天的早上8点
+      nextReport = morningReport;
+    } else if (now < eveningReport) {
+      // 如果当前时间在早上8点到晚上8点之间，下一次报告是今天的晚上8点
+      nextReport = eveningReport;
+    } else {
+      // 如果当前时间在晚上8点之后，下一次报告是明天的早上8点
+      nextReport = new Date(now);
+      nextReport.setDate(nextReport.getDate() + 1);
+      nextReport.setHours(8, 0, 0, 0);
+    }
     
     const timeLeft = Math.floor((nextReport - now) / (1000 * 60 * 60));
     const timeString = new Intl.DateTimeFormat('zh-CN', {
@@ -196,7 +211,7 @@ function MarketAnalysis() {
       setAutoReportLoading(true);
       setError(null);
       const response = await axios.get(`${API_URL}/trigger_auto_report`, {
-        timeout: 60000,
+        timeout: 120000,
         withCredentials: false,
         headers: {
           'Content-Type': 'application/json',
@@ -227,9 +242,47 @@ function MarketAnalysis() {
     }
   };
 
+  // 添加删除报告的函数
+  const deleteReport = async (reportId) => {
+    if (!window.confirm('确定要删除这份报告吗？')) {
+      return;
+    }
+
+    try {
+      const response = await axios.delete(`${API_URL}/reports/${reportId}`);
+      if (response.status === 200) {
+        // 如果删除的是当前显示的报告，清空当前报告
+        if (currentReport && currentReport.id === reportId) {
+          setCurrentReport(null);
+        }
+        // 刷新报告列表
+        fetchReports();
+      }
+    } catch (err) {
+      console.error('删除报告失败:', err);
+      alert('删除报告失败，请重试');
+    }
+  };
+
   return (
     <Container className="mt-4">
-      <h1 className="mb-4">市场分析中心</h1>
+      {/* 标题 - 居中显示 */}
+      <Row className="justify-content-center mb-4">
+        <Col xs={12} md={8} lg={6} xl={4}>
+          <h1 className="text-center mb-4 d-flex align-items-center justify-content-center" style={{
+            fontFamily: "'Noto Sans SC', sans-serif",
+            fontWeight: 700,
+            fontSize: '2.8rem',
+            color: '#2c3e50',
+            letterSpacing: '1px',
+            textShadow: '1px 1px 2px rgba(0,0,0,0.1)',
+            marginBottom: '1.5rem'
+          }}>
+            <AnalysisLogo size="2.5rem" className="me-3" style={{ color: '#2c3e50' }} />
+            市场分析中心
+          </h1>
+        </Col>
+      </Row>
       
       {/* Error and success alerts */}
       {error && <Alert variant="danger">{error}</Alert>}
@@ -327,6 +380,22 @@ function MarketAnalysis() {
                 </Form.Group>
               </Col>
             </Row>
+            <Row className="mt-3">
+              <Col xs={12}>
+                <Form.Group controlId="focusedCompanies">
+                  <Form.Label>关注企业列表</Form.Label>
+                  <Form.Control
+                    type="text"
+                    value={focusedCompanies}
+                    onChange={(e) => setFocusedCompanies(e.target.value)}
+                    placeholder="输入关注的企业名称，用顿号、逗号或空格分隔"
+                  />
+                  <Form.Text className="text-muted">
+                    系统将特别关注这些企业的相关新闻并进行分析
+                  </Form.Text>
+                </Form.Group>
+              </Col>
+            </Row>
             <Row className="mt-4">
               <Col className="text-center">
                 <Button 
@@ -379,7 +448,20 @@ function MarketAnalysis() {
                           <div>报告 #{report.id}</div>
                           <small>{formatDate(report.created_at)}</small>
                         </div>
-                        <Badge bg="info">{report.news_count} 条新闻</Badge>
+                        <div className="d-flex align-items-center">
+                          <Badge bg="info" className="me-2">{report.news_count} 条新闻</Badge>
+                          <Button
+                            variant="outline-danger"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteReport(report.id);
+                            }}
+                            className="ms-2"
+                          >
+                            删除
+                          </Button>
+                        </div>
                       </div>
                     </ListGroup.Item>
                   ))
@@ -464,6 +546,76 @@ function MarketAnalysis() {
                     </Accordion.Item>
                     
                     <Accordion.Item eventKey="3">
+                      <Accordion.Header>
+                        <strong>重点关注企业预测</strong>
+                      </Accordion.Header>
+                      <Accordion.Body>
+                        <div className="mb-3">
+                          <h5>企业走势预测</h5>
+                          {currentReport.company_predictions && Array.isArray(currentReport.company_predictions) && currentReport.company_predictions.length > 0 ? (
+                            <div className="company-predictions" style={{
+                              display: 'grid',
+                              gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+                              gap: '1rem',
+                              marginTop: '1rem'
+                            }}>
+                              {currentReport.company_predictions.map((prediction, index) => (
+                                <Card key={index} className="mb-3 shadow-sm" style={{
+                                  border: 'none',
+                                  borderRadius: '10px',
+                                  transition: 'transform 0.2s ease-in-out',
+                                  ':hover': {
+                                    transform: 'translateY(-2px)'
+                                  }
+                                }}>
+                                  <Card.Header className="bg-light" style={{
+                                    borderTopLeftRadius: '10px',
+                                    borderTopRightRadius: '10px',
+                                    borderBottom: 'none',
+                                    padding: '1rem'
+                                  }}>
+                                    <h6 className="mb-0" style={{
+                                      color: '#2c3e50',
+                                      fontWeight: '600',
+                                      fontSize: '1.1rem'
+                                    }}>{prediction.company}</h6>
+                                  </Card.Header>
+                                  <Card.Body style={{ padding: '1rem' }}>
+                                    <div className="prediction-content">
+                                      <p className="mb-0" style={{ 
+                                        color: '#34495e',
+                                        fontSize: '0.95rem',
+                                        lineHeight: '1.5'
+                                      }}>{prediction.report}</p>
+                                    </div>
+                                  </Card.Body>
+                                </Card>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-muted" style={{ 
+                              textAlign: 'center',
+                              padding: '2rem',
+                              backgroundColor: '#f8f9fa',
+                              borderRadius: '8px'
+                            }}>暂无企业预测数据</p>
+                          )}
+                        </div>
+                      </Accordion.Body>
+                    </Accordion.Item>
+                    
+                    <Accordion.Item eventKey="4">
+                      <Accordion.Header>
+                        <strong>推理过程</strong>
+                      </Accordion.Header>
+                      <Accordion.Body>
+                        <pre style={{ whiteSpace: 'pre-wrap' }}>
+                          {currentReport.reasoning || "无数据"}
+                        </pre>
+                      </Accordion.Body>
+                    </Accordion.Item>
+                    
+                    <Accordion.Item eventKey="5">
                       <Accordion.Header>
                         <strong>原始分析内容</strong>
                       </Accordion.Header>
