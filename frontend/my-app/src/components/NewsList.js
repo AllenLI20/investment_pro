@@ -27,13 +27,54 @@ function NewsList() {
   // 页码跳转状态
   const [jumpPage, setJumpPage] = useState('');
 
-  useEffect(() => {
-    fetchNews();
-  }, [sortBy, order, currentPage, pageSize, searchTerm]);
+  // 添加缓存状态
+  const [cachedNews, setCachedNews] = useState(null);
+  const [lastFetchTime, setLastFetchTime] = useState(null);
+  const CACHE_DURATION = 30 * 60 * 1000; // 30分钟缓存
 
-  const fetchNews = async () => {
+  // 优化 useEffect 依赖
+  useEffect(() => {
+    const shouldFetch = !cachedNews || 
+                       !lastFetchTime || 
+                       (Date.now() - lastFetchTime > CACHE_DURATION) ||
+                       searchTerm;
+    
+    if (shouldFetch) {
+      fetchNews();
+    } else {
+      // 使用缓存数据
+      const startIndex = (currentPage - 1) * pageSize;
+      const endIndex = Math.min(startIndex + pageSize, cachedNews.length);
+      const currentPageData = cachedNews.slice(startIndex, endIndex);
+      setNews(currentPageData);
+      setTotalItems(cachedNews.length);
+      setLoading(false);
+    }
+  }, [sortBy, order, searchTerm]); // 只在排序、顺序或搜索词改变时重新获取
+
+  const fetchNews = async (forceRefresh = false) => {
+    const startTime = Date.now();
+    console.log('开始获取新闻数据...');
+    
     try {
       setLoading(true);
+      setError(null);
+      
+      // 检查是否需要刷新缓存
+      const now = Date.now();
+      const shouldRefresh = forceRefresh || !cachedNews || !lastFetchTime || (now - lastFetchTime > CACHE_DURATION);
+      
+      if (!shouldRefresh && !searchTerm) {
+        console.log('使用缓存数据，耗时:', Date.now() - startTime, 'ms');
+        // 使用缓存数据
+        const startIndex = (currentPage - 1) * pageSize;
+        const endIndex = Math.min(startIndex + pageSize, cachedNews.length);
+        const currentPageData = cachedNews.slice(startIndex, endIndex);
+        setNews(currentPageData);
+        setTotalItems(cachedNews.length);
+        setLoading(false);
+        return;
+      }
       
       // 构建 URL 和查询参数
       const params = {
@@ -46,13 +87,12 @@ function NewsList() {
         params.keyword = searchTerm;
       }
       
-      console.log(`正在请求: ${API_URL}/news`, params);
+      console.log('准备发送请求到:', `${API_URL}/news`, '参数:', params);
+      const requestStartTime = Date.now();
       
       const response = await axios.get(`${API_URL}/news`, {
         params,
-        // 添加超时设置
         timeout: 10000,
-        // 添加 CORS 配置
         withCredentials: false,
         headers: {
           'Content-Type': 'application/json',
@@ -60,9 +100,19 @@ function NewsList() {
         }
       });
       
-      console.log('API 响应:', response.data);
+      console.log('收到服务器响应，耗时:', Date.now() - requestStartTime, 'ms');
+      console.log('响应数据大小:', JSON.stringify(response.data).length, '字节');
       
       const allNews = response.data.news || [];
+      console.log('获取到新闻数量:', allNews.length);
+      
+      // 更新缓存
+      if (!searchTerm) {
+        console.log('更新缓存数据...');
+        setCachedNews(allNews);
+        setLastFetchTime(now);
+      }
+      
       setTotalItems(allNews.length);
       
       // 计算当前页的数据
@@ -70,27 +120,59 @@ function NewsList() {
       const endIndex = Math.min(startIndex + pageSize, allNews.length);
       const currentPageData = allNews.slice(startIndex, endIndex);
       
+      console.log('设置当前页数据，耗时:', Date.now() - startTime, 'ms');
       setNews(currentPageData);
-      setError(null);
     } catch (err) {
-      console.error('完整错误对象:', err);
+      console.error('获取新闻失败:', err);
+      console.error('错误详情:', {
+        code: err.code,
+        message: err.message,
+        response: err.response?.data,
+        request: err.request
+      });
       
       let errorMessage = '获取新闻失败: ';
       
-      if (err.response) {
-        // 服务器响应了，但状态码不是 2xx
+      if (err.code === 'ECONNABORTED') {
+        errorMessage += '请求超时，请检查网络连接';
+      } else if (err.response) {
         errorMessage += `服务器返回 ${err.response.status} - ${err.response.data?.error || '未知错误'}`;
       } else if (err.request) {
-        // 请求已发出，但没有收到响应
         errorMessage += '无法连接到服务器，请检查后端服务是否运行';
       } else {
-        // 请求设置触发的错误
         errorMessage += err.message;
       }
       
       setError(errorMessage);
     } finally {
+      console.log('整个获取新闻过程总耗时:', Date.now() - startTime, 'ms');
       setLoading(false);
+    }
+  };
+
+  // 处理页码变化
+  const handlePageChange = (page) => {
+    setCurrentPage(page);
+    // 使用缓存数据更新当前页
+    if (cachedNews && !searchTerm) {
+      const startIndex = (page - 1) * pageSize;
+      const endIndex = Math.min(startIndex + pageSize, cachedNews.length);
+      const currentPageData = cachedNews.slice(startIndex, endIndex);
+      setNews(currentPageData);
+    }
+  };
+
+  // 处理每页显示数量变化
+  const handlePageSizeChange = (e) => {
+    const newSize = parseInt(e.target.value);
+    setPageSize(newSize);
+    setCurrentPage(1);
+    // 使用缓存数据更新当前页
+    if (cachedNews && !searchTerm) {
+      const startIndex = 0;
+      const endIndex = Math.min(newSize, cachedNews.length);
+      const currentPageData = cachedNews.slice(startIndex, endIndex);
+      setNews(currentPageData);
     }
   };
 
@@ -98,29 +180,64 @@ function NewsList() {
   const handleSearch = (e) => {
     e.preventDefault();
     setSearchTerm(keyword);
-    setCurrentPage(1); // 重置到第一页
+    setCurrentPage(1);
   };
   
   // 清除搜索
   const handleClearSearch = () => {
     setKeyword('');
     setSearchTerm('');
-    setCurrentPage(1); // 重置到第一页
+    setCurrentPage(1);
   };
 
   const triggerFetchNews = async () => {
+    const startTime = Date.now();
+    console.log('开始触发新闻抓取...');
+    
     try {
       setLoading(true);
+      console.log('发送抓取请求到:', `${API_URL}/fetch_news`);
+      const requestStartTime = Date.now();
+      
       const response = await axios.get(`${API_URL}/fetch_news`, {
-        timeout: 30000, // 抓取可能需要更长时间
+        timeout: 30000,
+        withCredentials: false,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        }
       });
-      alert(response.data.message || '抓取任务已启动！');
-      // 直接调用 fetchNews 而不是使用 fetchTrigger
-      setTimeout(() => fetchNews(), 3000);
+      
+      console.log('收到抓取响应，耗时:', Date.now() - requestStartTime, 'ms');
+      console.log('响应数据:', response.data);
+      
+      if (response.data.message) {
+        alert(response.data.message);
+      } else {
+        alert('抓取任务已启动！');
+      }
+      
+      console.log('准备刷新新闻列表...');
+      setTimeout(() => {
+        fetchNews(true).catch(err => {
+          console.error('刷新新闻列表失败:', err);
+          setError('刷新新闻列表失败，请稍后重试');
+        });
+      }, 3000);
     } catch (err) {
+      console.error('触发新闻抓取失败:', err);
+      console.error('错误详情:', {
+        code: err.code,
+        message: err.message,
+        response: err.response?.data,
+        request: err.request
+      });
+      
       let errorMessage = '触发新闻抓取失败: ';
       
-      if (err.response) {
+      if (err.code === 'ECONNABORTED') {
+        errorMessage += '请求超时，请检查网络连接';
+      } else if (err.response) {
         errorMessage += `服务器返回 ${err.response.status} - ${err.response.data?.error || '未知错误'}`;
       } else if (err.request) {
         errorMessage += '无法连接到服务器，请检查后端服务是否运行';
@@ -130,7 +247,10 @@ function NewsList() {
       
       setError(errorMessage);
     } finally {
-      setLoading(false);
+      console.log('整个抓取过程总耗时:', Date.now() - startTime, 'ms');
+      setTimeout(() => {
+        setLoading(false);
+      }, 5000);
     }
   };
 
@@ -274,14 +394,6 @@ function NewsList() {
         </div>
       </div>
     );
-  };
-  
-  // 处理每页显示数量变化
-  const handlePageSizeChange = (e) => {
-    const newSize = parseInt(e.target.value, 10);
-    setPageSize(newSize);
-    // 重置到第一页
-    setCurrentPage(1);
   };
 
   return (

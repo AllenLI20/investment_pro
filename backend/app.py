@@ -11,17 +11,26 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import text, JSON
+from flask_compress import Compress  # 添加压缩支持
 
 from ai_service import DeepseekAI
 
 
 app = Flask(__name__)
+Compress(app)  # 启用压缩
+
 # 修改CORS设置，明确允许所有来源
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # 数据库配置
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///finance_news.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,
+    'pool_recycle': 300,
+    'pool_size': 10,
+    'max_overflow': 20
+}
 db = SQLAlchemy(app)
 
 # 定义财经资讯模型
@@ -91,40 +100,32 @@ def update_database_schema():
                 for column_name in missing_columns:
                     column = model.__table__.columns[column_name]
                     
-                    # 将 SQLAlchemy 类型转换为 SQLite 类型
-                    type_str = str(column.type)
-                    if 'VARCHAR' in type_str or 'String' in type_str:
-                        sqlite_type = 'TEXT'
-                    elif 'INTEGER' in type_str:
-                        sqlite_type = 'INTEGER'
-                    elif 'DATETIME' in type_str:
-                        sqlite_type = 'DATETIME'
-                    elif 'BOOLEAN' in type_str:
-                        sqlite_type = 'INTEGER'
-                    else:
-                        sqlite_type = 'TEXT'  # 默认类型
+                    # 获取列的类型
+                    column_type = str(column.type)
+                    
+                    # 处理默认值
+                    default_value = column.default
+                    if default_value is not None:
+                        if callable(default_value):
+                            # 如果是函数，执行它获取默认值
+                            default_value = default_value()
+                        if isinstance(default_value, (list, dict)):
+                            # 如果是列表或字典，转换为 JSON 字符串
+                            default_value = json.dumps(default_value)
+                        # 如果是字符串，添加引号
+                        elif isinstance(default_value, str):
+                            default_value = f"'{default_value}'"
                     
                     # 构建 ALTER TABLE 语句
-                    sql = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sqlite_type}"
+                    sql = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    if default_value is not None:
+                        sql += f" DEFAULT {default_value}"
                     
-                    # 添加 NOT NULL 约束（如果需要）
-                    if not column.nullable:
-                        sql += " NOT NULL"
-                    
-                    # 添加默认值（如果有）
-                    if column.default is not None:
-                        if isinstance(column.default.arg, str):
-                            sql += f" DEFAULT '{column.default.arg}'"
-                        else:
-                            sql += f" DEFAULT {column.default.arg}"
-                    
-                    app.logger.info(f"正在为表 {table_name} 添加字段 {column_name}...")
-                    app.logger.info(f"SQL: {sql}")
+                    app.logger.info(f"执行 SQL: {sql}")
                     conn.execute(text(sql))
-            
-            conn.commit()
-            app.logger.info("数据库表结构更新完成")
-            
+                    conn.commit()
+                    
+        app.logger.info("数据库表结构更新完成")
     except Exception as e:
         app.logger.error(f"更新数据库表结构时出错: {e}")
         raise e
@@ -314,35 +315,98 @@ def run_fetch_news_task():
 # 自动生成报告的定时任务
 def auto_generate_report():
     """自动生成市场分析报告"""
-    try:
-        # 获取最近12小时的新闻
-        news = FinanceNews.query.filter(
-            FinanceNews.created_at >= datetime.utcnow() - timedelta(hours=12)
-        ).order_by(FinanceNews.created_at.desc()).limit(300).all()
-        
-        if not news:
-            return jsonify({'error': '没有找到最近12小时的新闻'}), 404
+    with app.app_context():
+        try:
+            # 获取最近12小时的新闻
+            hours = 12  # 默认分析12小时
+            max_news = 300  # 默认最多300条新闻
+            summary_limit = 100  # 默认摘要100字
+            focused_companies = ['腾讯', '小米集团', '中芯国际', '特斯拉', '药明康德', '阿里巴巴']  # 默认关注企业列表
             
-        # 生成分析报告
-        report = generate_market_analysis(
-            news=news,
-            hours=12,
-            max_news=300,
-            summary_limit=100,
-            focused_companies='腾讯、小米集团、中芯国际、特斯拉、药明康德、阿里巴巴'  # 添加默认关注企业列表
-        )
-        
-        if report:
-            return jsonify({
-                'message': '自动报告生成成功',
-                'report_id': report.id
-            })
-        else:
-            return jsonify({'error': '报告生成失败'}), 500
+            # 计算指定时间前
+            time_ago = datetime.utcnow() - timedelta(hours=hours)
             
-    except Exception as e:
-        logger.error(f"自动生成报告失败: {str(e)}")
-        return jsonify({'error': f'自动生成报告失败: {str(e)}'}), 500
+            # 获取指定时间范围内的新闻，按发布时间倒序排列
+            news_items = FinanceNews.query.filter(FinanceNews.created_at >= time_ago).order_by(FinanceNews.pub_time.desc()).all()
+            
+            if not news_items:
+                app.logger.warning("没有找到最近12小时的新闻")
+                return
+            
+            # 限制新闻数量
+            limited_news = news_items[:max_news]
+            app.logger.info(f"分析新闻: 最近{hours}小时内, 限制为最近{max_news}条, 实际选择{len(limited_news)}条")
+            
+            # 格式化新闻内容供分析
+            news_content = ""
+            for news in limited_news:
+                news_content += f"标题: {news.title}\n"
+                news_content += f"时间: {news.pub_time}\n"
+                news_content += f"类型: {news.article_type}\n"
+                if news.summary:
+                    # 限制摘要长度
+                    summary = news.summary[:summary_limit] + "..." if len(news.summary) > summary_limit else news.summary
+                    news_content += f"摘要: {summary}\n"
+                news_content += "\n---\n\n"
+            
+            # 检查输入长度
+            if len(news_content) > 30000:  # 根据模型限制调整此值
+                app.logger.warning(f"新闻内容太长: {len(news_content)} 字符，将被截断")
+                news_content = news_content[:30000] + "...\n[内容已截断]"
+            
+            # 初始化AI服务并分析新闻
+            ai_service = DeepseekAI()
+            try:
+                analysis_result = ai_service.analyze_news(news_content, focused_companies)
+            except Exception as e:
+                app.logger.error(f"AI分析失败: {str(e)}")
+                raise
+            
+            # 将 UTC 时间转换为北京时间（UTC+8）
+            time_ago_beijing = time_ago + timedelta(hours=8)
+            current_time_beijing = datetime.utcnow() + timedelta(hours=8)
+            time_range = f"{time_ago_beijing.strftime('%Y-%m-%d %H:%M:%S')} 至 {current_time_beijing.strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # 创建新的分析报告
+            new_report = AnalysisReport(
+                news_count=len(limited_news),
+                time_range=time_range,
+                reasoning=analysis_result["reasoning"],
+                analysis=analysis_result["analysis"],
+                focused_companies=focused_companies,  # 直接存储列表
+                news_impact=analysis_result["parsed_data"].get("news_impact"),
+                policy_impact=analysis_result["parsed_data"].get("policy_impact"),
+                market_prediction=analysis_result["parsed_data"].get("market_prediction")
+            )
+            
+            # 处理 company_predictions
+            company_predictions = analysis_result["parsed_data"].get("company_predictions", [])
+            if isinstance(company_predictions, list):
+                # 如果已经是列表格式，直接使用
+                new_report.company_predictions = company_predictions
+            elif isinstance(company_predictions, dict):
+                # 如果是字典格式，转换为列表格式
+                new_report.company_predictions = [
+                    {
+                        "company": company,
+                        "report": prediction
+                    }
+                    for company, prediction in company_predictions.items()
+                ]
+            else:
+                app.logger.warning(f"未知的 company_predictions 格式: {type(company_predictions)}")
+                new_report.company_predictions = []
+            
+            # 保存到数据库
+            db.session.add(new_report)
+            db.session.commit()
+            
+            app.logger.info(f"自动报告生成成功，报告ID: {new_report.id}")
+            return new_report
+            
+        except Exception as e:
+            app.logger.error(f"自动生成报告失败: {str(e)}")
+            raise  # 重新抛出异常以便 APScheduler 可以正确处理
 
 scheduler.add_job(run_fetch_news_task, 'interval', minutes=5)  # 每 5 分钟执行一次
 scheduler.add_job(delete_old_news, 'interval', days=1)  # 每天执行一次
@@ -376,20 +440,23 @@ def get_news():
     else:
         news_items = query.order_by(getattr(FinanceNews, sort_by).desc()).all()
 
+    # 只返回前端需要的字段，并限制摘要长度
     news_list = [
         {
             'title': news.title,
-            'link': news.link,
             'article_id': news.article_id,
-            'created_at': news.created_at.strftime("%Y-%m-%d %H:%M:%S"),  # 格式化时间
+            'created_at': news.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             'pub_time': news.pub_time,
             'article_type': news.article_type,
-            'summary': news.summary,  # 添加摘要字段
-            'content': news.content,  # 添加正文字段
-            'url': news.url  # 添加 URL 字段
+            'summary': news.summary[:200] + '...' if news.summary and len(news.summary) > 200 else news.summary,  # 限制摘要长度
+            'url': news.url
         } for news in news_items
     ]
-    return {'news': news_list}
+    
+    # 添加缓存控制头
+    response = jsonify({'news': news_list})
+    response.headers['Cache-Control'] = 'public, max-age=300'  # 缓存5分钟
+    return response
 
 @app.route('/fetch_news', methods=['GET'])
 def fetch_news():
